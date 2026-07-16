@@ -1,0 +1,113 @@
+name: Reintento instancia Oracle ARM
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: oracle-retry
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Configurar credenciales OCI
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_USER_OCID
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY_OCID
+          region=$OCI_REGION
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          printf '%s\n' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
+
+      - name: Intentar lanzar la instancia
+        id: intento
+        env:
+          OCI_AD: ${{ secrets.OCI_AD }}
+          OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+          OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          printf '%s\n' "$SSH_PUBLIC_KEY" > /tmp/aurex_oracle.pub
+          set +e
+          SALIDA=$(oci compute instance launch \
+            --availability-domain "$OCI_AD" \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus": 1, "memoryInGBs": 6}' \
+            --image-id "$OCI_IMAGE_ID" \
+            --subnet-id "$OCI_SUBNET_ID" \
+            --assign-public-ip true \
+            --display-name "aurex-server" \
+            --ssh-authorized-keys-file /tmp/aurex_oracle.pub \
+            2>&1)
+          CODIGO=$?
+          echo "$SALIDA"
+
+          # Nunca dejar el secreto en el log de salida por accidente.
+          rm -f /tmp/aurex_oracle.pub
+
+          if [ $CODIGO -eq 0 ]; then
+            echo "lanzada=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "cuerpo<<FIN_CUERPO"
+              echo "$SALIDA"
+              echo "FIN_CUERPO"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "lanzada=false" >> "$GITHUB_OUTPUT"
+            if echo "$SALIDA" | grep -qiE "NotAuthenticated|NotAuthorized|Unauthorized|InvalidParameter|MissingParameter|CannotParseRequest|does not exist|no existe"; then
+              echo "$(date -u '+%H:%M:%S') ❌ ERROR REAL (auth/config), no es falta de capacidad" >&2
+              echo "error_real=true" >> "$GITHUB_OUTPUT"
+            else
+              motivo=$(echo "$SALIDA" | grep -oiE "out of (host )?capacity|TooManyRequests|429|[0-9]{3}" | head -1)
+              echo "$(date -u '+%H:%M:%S') sin capacidad todavía (${motivo:-motivo desconocido}), se reintenta en el próximo cron" >&2
+            fi
+          fi
+
+      - name: Avisar que se consiguió la instancia
+        if: steps.intento.outputs.lanzada == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "✅ Instancia Oracle lanzada" \
+            --body "Se consiguió capacidad y se lanzó la instancia aurex-server.
+
+          \`\`\`json
+          ${{ steps.intento.outputs.cuerpo }}
+          \`\`\`
+
+          Este workflow se desactivó automáticamente para no seguir reintentando."
+
+      - name: Desactivar el workflow (ya no reintentar)
+        if: steps.intento.outputs.lanzada == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow disable retry.yml
+
+      - name: Fallar si el error es real (no falta de capacidad)
+        if: steps.intento.outputs.error_real == 'true'
+        run: exit 1
