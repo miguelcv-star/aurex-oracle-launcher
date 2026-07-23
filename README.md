@@ -2,9 +2,12 @@
 
 Reintenta, cada 5 minutos vía GitHub Actions (sin depender de ningún computador
 encendido), lanzar una instancia ARM Always Free (`VM.Standard.A1.Flex`, 1
-OCPU / 6 GB) en Oracle Cloud, región `sa-bogota-1`. Reemplaza al script local
-`~/.oci/aurex_retry_launch.sh` que corría en el Mac y se detenía cada vez que
-se apagaba.
+OCPU / 6 GB) en Oracle Cloud, región `sa-bogota-1`. Corre **en paralelo** con el
+script local `~/.oci/aurex_retry_launch.sh` (a propósito, no como reemplazo):
+el script local reintenta con mucha menos distancia entre intentos (90 s vs.
+las corridas reales de Actions, que llegan más espaciadas por el throttling de
+GitHub — ver abajo), y este workflow sirve de respaldo para cuando el Mac está
+apagado o sin red.
 
 ## Cómo funciona
 
@@ -25,6 +28,21 @@ se apagaba.
 - Si se consigue lanzar la instancia: se abre un **Issue** en este repo con
   los datos (incluida la IP pública) y el workflow **se desactiva solo**
   (`gh workflow disable`) para no seguir intentando ni gastar minutos.
+
+### Rotación de fault domain
+
+`sa-bogota-1` tiene un solo dominio de disponibilidad (AD), así que no hay
+forma de repartir los intentos por AD — y cambiar de región perdería la
+elegibilidad Always Free (atada a la región *home* del tenant). Lo único
+diversificable dentro de esa restricción es el **fault domain**: cada AD
+tiene 3 (`FAULT-DOMAIN-1/2/3`, agrupaciones de hardware distintas dentro del
+mismo AD). Cada corrida usa `GITHUB_RUN_NUMBER` (que GitHub incrementa 1 por
+corrida, automático) para rotar: corrida 1 → `FAULT-DOMAIN-1`, corrida 2 →
+`FAULT-DOMAIN-2`, corrida 3 → `FAULT-DOMAIN-3`, corrida 4 → de vuelta a
+`FAULT-DOMAIN-1`, etc. El script local hace la misma rotación por su propio
+número de intento — así entre los dos se cubren los 3 fault domains sin
+coordinarse entre sí. No hay garantía de que la escasez sea por fault domain
+y no por el AD completo, pero no cuesta nada intentarlo.
 
 ## Por qué un repo nuevo y público
 

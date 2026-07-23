@@ -52,8 +52,23 @@ jobs:
         run: |
           printf '%s\n' "$SSH_PUBLIC_KEY" > /tmp/aurex_oracle.pub
           set +e
+
+          # El único AD de sa-bogota-1 tiene 3 fault domains (agrupaciones de
+          # hardware distintas dentro del mismo AD). No hay forma de repartir
+          # por AD (solo hay uno) ni de cambiar de región (Always Free está
+          # atada a la región home), así que esto es lo único diversificable:
+          # cada corrida rota al siguiente fault domain (1,2,3,1,2,3...) según
+          # el número de corrida del workflow (GITHUB_RUN_NUMBER, que GitHub
+          # ya expone automático e incrementa 1 por corrida), por si la
+          # escasez de capacidad es específica de alguno y no del AD completo.
+          FAULT_DOMAINS=("FAULT-DOMAIN-1" "FAULT-DOMAIN-2" "FAULT-DOMAIN-3")
+          FD="${FAULT_DOMAINS[$(( (GITHUB_RUN_NUMBER - 1) % 3 ))]}"
+          echo "$(date -u '+%H:%M:%S') corrida #$GITHUB_RUN_NUMBER -> $FD" >&2
+          echo "fault_domain=$FD" >> "$GITHUB_OUTPUT"
+
           SALIDA=$(oci compute instance launch \
             --availability-domain "$OCI_AD" \
+            --fault-domain "$FD" \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --shape "VM.Standard.A1.Flex" \
             --shape-config '{"ocpus": 1, "memoryInGBs": 6}' \
@@ -83,7 +98,7 @@ jobs:
               echo "error_real=true" >> "$GITHUB_OUTPUT"
             else
               motivo=$(echo "$SALIDA" | grep -oiE "out of (host )?capacity|TooManyRequests|429|[0-9]{3}" | head -1)
-              echo "$(date -u '+%H:%M:%S') sin capacidad todavía (${motivo:-motivo desconocido}), se reintenta en el próximo cron" >&2
+              echo "$(date -u '+%H:%M:%S') sin capacidad todavía en $FD (${motivo:-motivo desconocido}), se reintenta en el próximo cron" >&2
             fi
           fi
 
@@ -94,7 +109,7 @@ jobs:
         run: |
           gh issue create \
             --title "✅ Instancia Oracle lanzada" \
-            --body "Se consiguió capacidad y se lanzó la instancia aurex-server.
+            --body "Se consiguió capacidad (${{ steps.intento.outputs.fault_domain }}) y se lanzó la instancia aurex-server.
 
           \`\`\`json
           ${{ steps.intento.outputs.cuerpo }}
