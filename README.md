@@ -93,3 +93,11 @@ todavía", todo está bien configurado y solo falta que Oracle libere un hueco.
 Una corrida que falla "de verdad" (rojo, no solo "sin capacidad") significa
 un error de configuración/autenticación — revisar el log de esa corrida
 específica antes de asumir que es solo falta de capacidad.
+
+## Notas de mantenimiento
+
+- 2026-09-22: el workflow se apagó solo por la política de GitHub de
+  desactivar cron jobs tras 60 días sin actividad en el repo (las corridas
+  programadas no cuentan como "actividad" para ese contador, solo lo hacen
+  los pushes). Reactivado manualmente. Si vuelve a pasar, basta con
+  `gh workflow enable retry.yml` o un commit cualquiera a este repo.
